@@ -1,4 +1,4 @@
 [submodule "src/browser"]
 	path = src/browser
-	url = https://github.com/netsblox/Snap--Build-Your-Own-Blocks
+	url = https://github.com/c2stem/snap-physics.git
 	branch = netsblox
