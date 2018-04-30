@@ -16,35 +16,6 @@ var fs = require('fs'),
     types = require('./input-types.js'),
     RESERVED_FN_NAMES = require('../../common/constants').RPC.RESERVED_FN_NAMES;
 
-// in: arg obj and input value
-// out: {isValid: boolean, value, msg}
-function parseArgValue(arg, input, ctx) {
-    let inputStatus = {isValid: true, msg: '', value: input};
-    // is the argument provided or not? 
-    if (input === '') {
-        if (!arg.optional) {
-            inputStatus.msg = `${arg.name} is required.`;
-            inputStatus.isValid = false;
-            inputStatus.value = undefined;
-        }
-    } else {
-        if (types.parse.hasOwnProperty(arg.type)) { // if we have the type handler
-            try {
-                inputStatus.value = types.parse[arg.type](input, ctx);
-            } catch (e) {
-                inputStatus.isValid = false;
-                inputStatus.msg = `"${arg.name}" is not a valid ${types.getNBType(arg.type)}.`;
-                if (e.message.includes(arg.type)) {
-                    inputStatus.msg = `"${arg.name}" is not valid. ` + e.message;
-                } else if (e.message) {
-                    inputStatus.msg += ' ' + e.message;
-                }
-            }
-        }
-    }
-    return inputStatus;
-}
-
 const DEFAULT_COMPATIBILITY = {arguments: {}};
 /**
  * RPCManager
@@ -296,7 +267,7 @@ RPCManager.prototype.callRPC = function(name, ctx, args) {
         // assuming doc params are defined in order!
         doc.args.forEach((arg, idx) => {
             if (arg.type) {
-                let input = parseArgValue(arg, args[idx], ctx);
+                let input = this.parseArgValue(arg, args[idx], ctx);
                 // if there was no errors update the arg with the parsed input
                 if (input.isValid) {
                     args[idx] = input.value;
@@ -315,8 +286,45 @@ RPCManager.prototype.callRPC = function(name, ctx, args) {
     prettyArgs = prettyArgs.substring(1, prettyArgs.length-1);  // remove brackets
     this._logger.log(`calling ${ctx.serviceName}.${name}(${prettyArgs})`);
 
-    const result = ctx[name].apply(ctx, args);
-    return this.sendRPCResult(ctx.response, result);
+    try {
+        const result = ctx[name].apply(ctx, args);
+        return this.sendRPCResult(ctx.response, result);
+    } catch (err) {
+        this.sendRPCError(ctx.response, err);
+    }
+};
+
+// in: arg obj and input value
+// out: {isValid: boolean, value, msg}
+RPCManager.prototype.parseArgValue = function (arg, input, ctx) {
+    let inputStatus = {isValid: true, msg: '', value: input};
+    // is the argument provided or not?
+    if (input === '') {
+        if (!arg.optional) {
+            inputStatus.msg = `${arg.name} is required.`;
+            inputStatus.isValid = false;
+            inputStatus.value = undefined;
+        }
+    } else if (arg.type) {
+        const typeName = arg.type.name;
+        if (types.parse.hasOwnProperty(typeName)) { // if we have the type handler
+            try {
+                const args = [input].concat(arg.type.params);
+                args.push(ctx);
+                inputStatus.value = types.parse[typeName].apply(null, args);
+            } catch (e) {
+                inputStatus.isValid = false;
+                const netsbloxType = types.getNBType(typeName);
+                inputStatus.msg = `"${arg.name}" is not a valid ${netsbloxType}.`;
+                if (e.message.includes(netsbloxType)) {
+                    inputStatus.msg = `"${arg.name}" is not valid. ` + e.message;
+                } else if (e.message) {
+                    inputStatus.msg += ' ' + e.message;
+                }
+            }
+        }
+    }
+    return inputStatus;
 };
 
 RPCManager.prototype.sendRPCResult = function(response, result) {
@@ -325,11 +333,7 @@ RPCManager.prototype.sendRPCResult = function(response, result) {
             if (typeof result.then === 'function') {
                 return result
                     .then(result => this.sendRPCResult(response, result))
-                    .catch(err => {
-                        this._logger.error(`Uncaught exception: ${err.toString()}`);
-                        if (response.headersSent) return;
-                        response.status(500).send('Error occurred!');
-                    });
+                    .catch(err => this.sendRPCError(response, err));
             } else if (Array.isArray(result)) {
                 return response.json(result);
             } else {  // arbitrary JSON
@@ -341,6 +345,12 @@ RPCManager.prototype.sendRPCResult = function(response, result) {
             return response.sendStatus(200);
         }
     }
+};
+
+RPCManager.prototype.sendRPCError = function(response, error) {
+    this._logger.error(`Uncaught exception: ${error.toString()}`);
+    if (response.headersSent) return;
+    response.status(500).send(error.message);
 };
 
 RPCManager.prototype.isRPCLoaded = function(rpcPath) {
