@@ -4,7 +4,7 @@
 [![Greenkeeper badge](https://badges.greenkeeper.io/NetsBlox/NetsBlox.svg)](https://greenkeeper.io/)
 # NetsBlox
 
-NetsBlox is a visual programming language which allows people to develop networked programs.
+NetsBlox is a visual programming language which allows people to develop networked programs.  
 
 ## Overview
 Netsblox is an extension of _Snap!_ which allows users to use some distributed systems principles and develop networked apps. That is, users can create apps that can interact with other instances of Netsblox. An introduction to the new networking features can be found [here](https://github.com/NetsBlox/NetsBlox/wiki/Introduction-to-Distributed-Programming-in-NetsBlox)
