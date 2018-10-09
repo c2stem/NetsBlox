@@ -27,6 +27,15 @@ describe('rpc-manager', function() {
             assert(!response.headersSent);
         });
 
+        it('should convert list of objects to Snap-friendly format', function() {
+            const objs = [{name: 'brian'}, {name: 'hamid'}];
+            RPCManager.sendRPCResult(response, objs);
+
+            const sentData = response.response;
+            assert.equal(sentData[0][0][0], 'name');
+            assert.equal(sentData[0][0][1], 'brian');
+        });
+
         it('should send promise result (if not sent)', function(done) {
             var result = Q(4);
             RPCManager.sendRPCResult(response, result)
@@ -77,13 +86,13 @@ describe('rpc-manager', function() {
         };
 
         it('should be able to parse parameterized types', function() {
-            const result = RPCManager.parseArgValue(arg, '12');
-            assert.equal(typeof result.value, 'number');
+            return RPCManager.parseArgValue(arg, '12')
+                .then(result => assert.equal(typeof result.value, 'number'));
         });
 
         it('should pass params to type parser', function() {
-            const result = RPCManager.parseArgValue(arg, '22');
-            assert(!result.isValid);
+            RPCManager.parseArgValue(arg, '22')
+                .then(result => assert(!result.isValid));
         });
     });
 });

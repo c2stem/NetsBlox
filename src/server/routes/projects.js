@@ -4,10 +4,8 @@ var _ = require('lodash'),
     Q = require('q'),
     Utils = _.extend(require('../utils'), require('../server-utils.js')),
     middleware = require('./middleware'),
-    RoomManager = require('../rooms/room-manager'),
-    SocketManager = require('../socket-manager'),
+    NetworkTopology = require('../network-topology'),
     PublicProjects = require('../storage/public-projects'),
-    Users = require('../storage/users'),
     EXAMPLES = require('../examples'),
     debug = require('debug'),
     log = debug('netsblox:api:projects:log'),
@@ -16,7 +14,9 @@ var _ = require('lodash'),
     Jimp = require('jimp'),
     error = debug('netsblox:api:projects:error');
 
+const DEFAULT_ROLE_NAME = 'myRole';
 const Projects = require('../storage/projects');
+const Users = require('../storage/users');
 
 
 /**
@@ -71,6 +71,7 @@ var getProjectInfo = function(project) {
     preview.Updated = new Date(preview.Updated);
     preview.Public = project.Public;
     preview.Owner = project.owner;
+    preview.ID = project._id.toString();
     return preview;
 };
 
@@ -85,38 +86,6 @@ var getProjectThumbnail = function(project) {
 };
 
 ////////////////////// Project Helpers //////////////////////
-var getRoomsNamed = function(name, user, owner) {
-    owner = owner || user.username;
-    const uuid = Utils.uuid(owner, name);
-
-    trace(`looking up projects ${uuid} for ${user.username}`);
-    let getProject = user.username === owner ? user.getProject(name) :
-        user.getSharedProject(owner, name);
-
-    return getProject.then(project => {
-        const activeRoom = RoomManager.getExistingRoom(owner, name);
-        const areSame = !!activeRoom && !!project &&
-            activeRoom.originTime === project.originTime;
-
-
-        if (project) {
-            trace(`found project ${uuid} for ${user.username}`);
-        } else {
-            trace(`no ${uuid} project found for ${user.username}`);
-        }
-
-        if (areSame) {
-            project = activeRoom.getProject() || project;
-        }
-
-        return {
-            active: activeRoom,
-            stored: project,
-            areSame: areSame
-        };
-    });
-};
-
 var sendProjectTo = function(project, res) {
     return project.getLastUpdatedRole()
         .then(role => {
@@ -160,101 +129,256 @@ var applyAspectRatio = function (thumbnail, aspectRatio) {
 
 module.exports = [
     {
-        Service: 'saveProject',
-        Parameters: 'roleName,projectName,currentProjectName,ownerId,overwrite,srcXml,mediaXml',
+        Service: 'setProjectName',
+        Parameters: 'projectId,name',
         Method: 'Post',
         Note: '',
-        middleware: ['isLoggedIn'],
+        Handler: async function(req, res) {
+            const {projectId} = req.body;
+            let {name} = req.body;
+
+            // Resolve conflicts with transient, marked for deletion projects
+            const project = await Projects.getById(projectId);
+            if (!project) {
+                return res.status(400).send(`Project Not Found`);
+            }
+
+            // Get a valid name
+            const projects = await Projects.getAllRawUserProjects(project.owner);
+            const projectsByName = {};
+
+            projects
+                .forEach(project => projectsByName[project.name] = project);
+
+            const basename = name;
+            let i = 2;
+            let collision = projectsByName[name];
+            while (collision &&
+                collision._id.toString() !== projectId &&
+                !collision.deleteAt  // delete existing a little early
+                ) {
+                name = `${basename} (${i})`;
+                i++;
+                collision = projectsByName[name];
+            }
+
+            if (collision && collision.deleteAt) {
+                await Projects.destroy(collision._id);
+            }
+
+            await project.setName(name);
+            const state = await NetworkTopology.onRoomUpdate(projectId);
+            res.json(state);
+        }
+    },
+    {
+        Service: 'newProject',
+        Parameters: 'clientId,roleName',
+        Method: 'Post',
+        Note: '',
         Handler: function(req, res) {
-            const username = req.session.username;
-            const {projectName, roleName, ownerId, currentProjectName, overwrite} = req.body;
+            const {clientId} = req.body;
+            let {roleName} = req.body;
+
+            const name = 'untitled';
+            let user = null;
+            let userId = clientId;
+
+            roleName = roleName || DEFAULT_ROLE_NAME;
+
+            let project = null;
+            return Q.nfcall(middleware.trySetUser, req, res)
+                .then(loggedIn => {
+                    if (loggedIn) {
+                        user = req.session.user;
+                        userId = req.session.username;
+                    }
+
+                    return Projects.new({owner: userId})
+                        .then(newProject => {
+                            project = newProject;
+                            const projectId = project._id.toString();
+                            return project.setRole(roleName, Utils.getEmptyRole(roleName))
+                                .then(() => user ? user.getNewNameFor(name, projectId) : name)
+                                .then(name => project.setName(name));
+                        });
+                })
+                .then(() => project.getRoleId(roleName))
+                .then(roleId => {
+                    const projectId = project.getId();
+                    this._logger.trace(`Created new project: ${projectId} (${roleName})`);
+                    return NetworkTopology.setClientState(clientId, projectId, roleId, userId)
+                        .then(() => res.send({
+                            projectId,
+                            roleId,
+                            name: project.name,
+                            roleName
+                        }));
+                });
+        }
+    },
+    {
+        Service: 'importProject',
+        Parameters: 'clientId,projectId,name,role,roles',
+        Method: 'Post',
+        Note: '',
+        Handler: function(req, res) {
+            const {clientId, name, roles} = req.body;
+            let {role} = req.body;
+            const userId = req.session ? req.session.username : clientId;
+            const user = req.session && req.session.user;
+
+            return Projects.new({owner: userId})
+                .then(project => {
+                    role = role || DEFAULT_ROLE_NAME;
+                    return project.setRoles(roles)
+                        .then(() => user ? user.getNewName(name) : name)
+                        .then(name => project.setName(name))
+                        .then(() => project.getRoleId(role))
+                        .then(roleId => {
+                            const projectId = project.getId();
+                            return NetworkTopology.setClientState(clientId, projectId, roleId, userId)
+                                .then(state => {
+                                    res.json({
+                                        state,
+                                        roleId,
+                                        projectId
+                                    });
+                                });
+                        });
+                });
+        }
+    },
+    {
+        Service: 'saveProject',
+        Parameters: 'roleId,roleName,projectName,projectId,ownerId,overwrite,srcXml,mediaXml',
+        Method: 'Post',
+        Note: '',
+        middleware: ['isLoggedIn', 'setUser'],
+        Handler: function(req, res) {
+            // Check permissions
+            // TODO
+            const {user} = req.session;
+            const {roleId, ownerId, projectId, overwrite, roleName} = req.body;
+            let {projectName} = req.body;
             const {srcXml, mediaXml} = req.body;
 
-
-            const saveAs = () => {
-                const roleData = {
-                    SourceCode: srcXml,
-                    Media: mediaXml
-                };
-                activeRoom.changeName(projectName)
-                    .then(() => activeRoom.getProject().archive())
-                    .then(() => activeRoom.setRole(roleName, roleData))
-                    .then(() => activeRoom.getProject().persist())
-                    .then(() => res.status(200).send('saved'))
-                    .catch(err => {
-                        const msg = `could not save ${currentProjectName} for ${ownerId}: ${err}`;
-                        error(msg);
-                        throw err;
-                    });
-            };
-
-            // If we are going to overwrite the project
-            //   - set the name
-            //   - if the other project is open, rename it
-            //   - ow, delete it
+            // Get any projects with colliding name
+            //   - if they are currently opened
+            //     - rename room
+            //     - set to transient
+            //   - else
+            //     - delete
             //
-            // If we are not overwriting the project, just name it and save!
+            // Get the project
+            //   - set the name
+            //   - set the role content
+            //   - persist
+            //
+            let project = null;
+            trace(`Saving ${roleId} from ${projectName} (${projectId})`);
+            return Projects.getById(projectId)
+                .then(_project => {
+                    // if project name is different from save name,
+                    // it is "Save as" (make a copy)
 
-            trace(`Saving ${roleName} from ${currentProjectName} (${ownerId})`);
+                    project = _project;
+                    if (!project) {
+                        throw new Error(`Project not found.`);
+                    }
 
-            // Check that the user can edit the project?
-            const activeRoom = RoomManager.getExistingRoom(ownerId, currentProjectName);
-            if (overwrite && projectName !== currentProjectName) {
-                trace(`overwriting ${projectName} with ${currentProjectName} for ${username}`);
+                    const isSaveAs = project.name !== projectName;
 
-                const otherRoom = RoomManager.getExistingRoom(username, projectName);
-                const isSame = otherRoom === activeRoom;
-                if (otherRoom && !isSame) {  // rename the existing, active room
-                    trace(`Renaming existing open project: ${projectName}`);
-                    return otherRoom.changeName(projectName, true).then(saveAs);
-                } else {  // delete the existing
-                    return Projects.get(username, projectName)
-                        .then(project => {
-                            if (project) {
-                                return project.destroy();
-                            }
-                        })
-                        .then(saveAs);
-                }
-            } else {
-                return saveAs();
-            }
+                    if (isSaveAs) {
+                        // Only copy original if it has already been saved
+                        trace(`Detected "save as". Saving ${project.name} as ${projectName}`);
+                        return project.isTransient()
+                            .then(isTransient => {
+                                if (!isTransient) {
+                                    trace(`Original project already saved. Copying original ${project.name}`);
+                                    return project.getCopy()  // save the original
+                                        .then(copy => copy.persist());
+                                }
+                            })
+                            .then(() => Projects.get(ownerId, projectName))
+                            .then(existingProject => {  // overwrite or rename any collisions
+                                if (!existingProject || existingProject.getId().toString() === projectId) {
+                                    return null;
+                                }
+                                const collision = existingProject;
+                                const isActive = NetworkTopology.getSocketsAtProject(collision.getId()).length > 0;
+                                if (isActive) {
+                                    trace(`found name collision with open project. Renaming and unpersisting.`);
+                                    return user.getNewName(projectName)
+                                        .then(name => collision.setName(name))
+                                        .then(() => collision.unpersist());
+                                } else if (overwrite) {
+                                    // FIXME: What if this is occupied by users with a patchy ws connection?
+                                    trace(`found name collision with project. Overwriting ${project.name}.`);
+                                    return collision.destroy();
+                                } else {  // rename the project
+                                    return user.getNewName(projectName)
+                                        .then(name => projectName = name);
+                                }
+                            });
+                    }
+                })
+                .then(() => project.setName(projectName))  // update room name
+                .then(() => NetworkTopology.onRoomUpdate(projectId))
+                .then(() => project.archive())
+                .then(() => {
+                    const roleData = {
+                        ProjectName: roleName,
+                        SourceCode: srcXml,
+                        Media: mediaXml
+                    };
+                    return project.setRoleById(roleId, roleData);
+                })
+                .then(() => project.persist())
+                .then(() => res.status(200).send({name: projectName, projectId, roleId}))
+                .catch(err => {
+                    error(`Error saving ${projectId}:`, err);
+                    return res.status(500).send(err.message);
+                });
         }
     },
     {
         Service: 'saveProjectCopy',
-        Parameters: 'socketId',
+        Parameters: 'clientId,projectId',
         Method: 'Post',
         Note: '',
-        middleware: ['hasSocket', 'isLoggedIn'],
+        middleware: ['isLoggedIn', 'setUser'],
         Handler: function(req, res) {
-            var username = req.session.username,
-                {socketId} = req.body,
-                socket = SocketManager.getSocket(socketId),
-
-                activeRoom = socket._room;
-
-            if (!activeRoom) {
-                error(`Could not find active room for "${username}" - cannot save!`);
-                return res.status(500).send('ERROR: active room not found');
-            }
+            // Save the latest role content (include xml in the req)
+            // TODO
+            const {user} = req.session;
+            const {projectId} = req.body;
 
             // make a copy of the project for the given user and save it!
-            return Users.get(username)
-                .then(user => {
-                    let name = `Copy of ${activeRoom.name}`;
-                    let project = null;
-                    return user.getNewName(name)
-                        .then(_name => name = _name)
-                        .then(() => activeRoom.save())
-                        .then(() => activeRoom.getProject().getCopy(user))
-                        .then(_project => project = _project)
-                        .then(() => project.setName(name))
-                        .then(() => project.persist())
-                        .then(() => {
-                            trace(`${username} saved a copy of project: ${name}`);
-                            res.sendStatus(200);
-                        });
+            let name = null;
+            let project = null;
+            return user.getNewName(name)
+                .then(_name => {
+                    name = _name;
+                    return Projects.getById(projectId);
+                })
+                .then(project => {
+                    if (!project) {
+                        throw new Error(`Project not found.`);
+                    }
+                    name = `Copy of ${project.name || 'untitled'}`;
+                    return project.getCopyFor(user);
+                })
+                .then(_project => project = _project)
+                .then(() => project.setName(name))
+                .then(() => project.persist())
+                .then(() => {
+                    trace(`${user.username} saved a copy of project: ${name}`);
+                    const result = {
+                        name,
+                        projectId: project.getId()
+                    };
+                    return res.status(200).send(result);
                 });
         }
     },
@@ -265,7 +389,7 @@ module.exports = [
         Note: '',
         middleware: ['isLoggedIn', 'noCache'],
         Handler: function(req, res) {
-            const origin = `${req.protocol}://${req.get('host')}`;
+            const origin = `${process.env.SERVER_PROTOCOL || req.protocol}://${req.get('host')}`;
             var username = req.session.username;
             log(`${username} requested shared project list from ${origin}`);
 
@@ -300,9 +424,7 @@ module.exports = [
     },
     {
         Service: 'getProjectList',
-        Parameters: '',
         Method: 'Get',
-        Note: '',
         middleware: ['isLoggedIn', 'noCache'],
         Handler: function(req, res) {
             const origin = `${req.protocol}://${req.get('host')}`;
@@ -340,109 +462,160 @@ module.exports = [
     },
     {
         Service: 'hasConflictingStoredProject',
-        Parameters: 'socketId',
+        Parameters: 'projectId,name',
         Method: 'post',
         Note: '',
-        middleware: ['isLoggedIn', 'hasSocket', 'noCache', 'setUser'],
+        middleware: ['isLoggedIn', 'noCache', 'setUser'],
         Handler: function(req, res) {
-            var socket = SocketManager.getSocket(req.body.socketId),
-                roomName = socket._room.name,
-                user = req.session.user;
+            const {projectId, name} = req.body;
+            const user = req.session.user;
 
-            return getRoomsNamed.call(this, roomName, user).then(rooms => {
+            // Check if the name will conflict with any currently saved projects
+            return user.getRawProjects()
+                .then(projects => {
+                    const conflict = projects
+                        .find(project => project.name === name && project._id.toString() !== projectId);
 
-                var hasConflicting = rooms.stored && !rooms.areSame;
-
-                log(`${user.username} is checking if project "${roomName}" conflicts w/ any saved names (${hasConflicting})`);
-                // Check if it is actually the same - do the originTime's match?
-                return res.send(`hasConflicting=${!!hasConflicting}`);
-            });
+                    log(`${user.username} is checking if "${name}" conflicts w/ any saved names (${!!conflict})`);
+                    return res.send(`hasConflicting=${!!conflict}`);
+                });
         }
     },
     {
         Service: 'isProjectActive',
-        Parameters: 'ProjectName',
+        Parameters: 'clientId,projectId',
         Method: 'post',
         Note: '',
-        middleware: ['isLoggedIn', 'noCache', 'setUser'],
+        middleware: ['isLoggedIn', 'noCache'],
         Handler: function(req, res) {
-            var roomName = req.body.ProjectName,
-                user = req.session.user;
+            const {clientId, projectId} = req.body;
+            const userCount = NetworkTopology.getSocketsAtProject(projectId)
+                .filter(socket => socket.uuid !== clientId).length;
+            const active = userCount > 0;
 
-            return getRoomsNamed.call(this, roomName, user).then(rooms => {
-
-                log(`${user.username} is checking if project "${req.body.ProjectName}" is active (${rooms.areSame})`);
-                // Check if it is actually the same - do the originTime's match?
-                return res.send(`active=${rooms.areSame}`);
-            });
+            return res.json({active});
         }
     },
     {
         Service: 'joinActiveProject',
-        Parameters: 'ProjectName,owner',
+        Parameters: 'projectId',
         Method: 'post',
         Note: '',
         middleware: ['isLoggedIn', 'noCache', 'setUser'],
         Handler: function(req, res) {
-            var roomName = req.body.ProjectName,
-                user = req.session.user,
-                owner = req.body.owner || user.username;
+            const {projectId} = req.body;
+            const {user} = req.session;
 
-            log(`${user.username} joining active ${owner}/${roomName}`);
-            return getRoomsNamed.call(this, roomName, user, owner).then(rooms => {
-                // Get the active project and join it
-                if (rooms.active) {
-                    // Join the project
-                    Utils.joinActiveProject(user.username, rooms.active, res);
-                } else if (rooms.stored) {  // else, getProject w/ the stored version
-                    sendProjectTo(rooms.stored, res);
-                } else {  // if there is no stored version, ERROR!
-                    res.send('ERROR: Project not found');
-                }
-            });
+            log(`${user.username} joining project ${projectId}`);
+            // Join the given project
+            return Projects.getById(projectId)
+                .then(project => {
+                    if (project) {
+
+                        return project.getRawRoles()
+                            .then(metadata => {  // Get an unoccupied role
+                                const occupiedRoles = NetworkTopology.getSocketsAtProject(projectId)
+                                    .map(socket => socket.roleId);
+                                const unoccupiedRoles = metadata
+                                    .filter(data => !occupiedRoles.includes(data.ID));
+                                const roleChoices = unoccupiedRoles.length ?
+                                    unoccupiedRoles : metadata;
+
+                                const roleId = Utils.sortByDateField(roleChoices, 'Updated', -1).shift().ID;
+                                return project.getRoleById(roleId);
+                            })
+                            .then(role => {
+                                const serialized = Utils.serializeRole(role, project);
+                                return res.send(serialized);
+                            });
+                    } else {
+                        return res.send('ERROR: Project not found');
+                    }
+                });
+        }
+    },
+    {
+        Service: 'getProjectByName',
+        Parameters: 'owner,projectName',
+        Method: 'post',
+        Note: '',
+        middleware: ['isLoggedIn', 'noCache', 'setUser'],
+        Handler: function(req, res) {
+            const {owner, projectName} = req.body;
+            const {user, username} = req.session;
+
+            // Check permissions
+            // TODO
+
+            trace(`${username} opening project ${owner}/${projectName}`);
+            return Projects.get(owner, projectName)
+                .then(project => {
+                    if (project) {
+                        if (username !== owner) {  // send a copy
+                            return project.getCopyFor(user)
+                                .then(copy => sendProjectTo(copy, res));
+                        }
+
+                        return sendProjectTo(project, res);
+                    } else {
+                        res.send('ERROR: Project not found');
+                    }
+                });
+        }
+    },
+    {
+        Service: 'getEntireProject',
+        Parameters: 'projectId',
+        Method: 'post',
+        Note: '',
+        middleware: ['isLoggedIn', 'noCache', 'setUser'],
+        Handler: async function(req, res) {
+            const {projectId} = req.body;
+            const {username} = req.session;
+
+            // TODO: add auth!
+
+            // Get the projectName
+            trace(`${username} opening project ${projectId}`);
+            const project = await Projects.getById(projectId);
+
+            if (!project) {
+                return res.status(404).send('Project not found');
+            }
+
+            const xml = await project.toXML();
+            res.set('Content-Type', 'text/xml');
+            return res.send(xml);
         }
     },
     {
         Service: 'getProject',
-        Parameters: 'owner,projectName,socketId',
+        Parameters: 'projectId,roleId',
         Method: 'post',
         Note: '',
         middleware: ['isLoggedIn', 'noCache', 'setUser'],
         Handler: function(req, res) {
-            var {owner, projectName, socketId} = req.body,
-                user = req.session.user,
-                socket = socketId && SocketManager.getSocket(socketId);
-
-            if (socket) {
-                socket.leave();
-            }
+            const {projectId} = req.body;
+            let {roleId} = req.body;
+            const {username} = req.session;
 
             // Get the projectName
-            trace(`${user.username} opening project ${owner}/${projectName}`);
-            return getRoomsNamed.call(this, projectName, user, owner).then(rooms => {
-                if (rooms.active) {
-                    trace(`room with name ${projectName} already open. Are they the same? ${rooms.areSame}`);
-                    if (rooms.areSame) {
-                        // Clone, change the room name, and send!
-                        // Since they are the same, we assume the user wants to create
-                        // a copy of the active room
-                        return rooms.stored.getCopy(user)
-                            .then(copy => sendProjectTo(copy, res));
-                    } else {
-                        // not the same; simply change the name of the active room
-                        // (the active room must be newer since it hasn't been saved
-                        // yet)
-                        trace(`active room is ${projectName} already open`);
-                        rooms.active.changeName();
-                        sendProjectTo(rooms.stored, res);
+            trace(`${username} opening project ${projectId}`);
+            let project;
+            return Projects.getById(projectId)
+                .then(result => {  // if no roleId specified, get the last updated
+                    project = result;
+                    if (!roleId) {
+                        return project.getLastUpdatedRole()
+                            .then(role => roleId = role.ID);
                     }
-                } else if (rooms.stored) {
-                    trace(`no active room with name ${projectName}. Proceeding normally`);
-                    sendProjectTo(rooms.stored, res);
-                } else {
-                    res.send('ERROR: Project not found');
-                }
-            });
+                })
+                .then(() => project.getRoleById(roleId))
+                .then(role => {
+                    const serialized = Utils.serializeRole(role, project);
+                    return res.send(serialized);
+                })
+                .catch(err => res.status(500).send('ERROR: ' + err));
         }
     },
     {
@@ -465,21 +638,11 @@ module.exports = [
                         return res.status(400).send(`${project} not found!`);
                     }
 
-                    const active = RoomManager.isActiveRoom(project.getId());
-
-                    if (active) {
-                        return project.unpersist()
-                            .then(() => {
-                                trace(`project ${project.name} set to transient. will be deleted on users exit`);
-                                return res.send('project deleted!');
-                            });
-                    } else {
-                        return project.destroy()
-                            .then(() => {
-                                trace(`project ${project.name} deleted`);
-                                return res.send('project deleted!');
-                            });
-                    }
+                    return project.destroy()
+                        .then(() => {
+                            trace(`project ${project.name} deleted`);
+                            return res.send('project deleted!');
+                        });
                 });
         }
     },
@@ -523,14 +686,27 @@ module.exports = [
         URL: 'projects/:owner',
         middleware: ['setUsername'],
         Handler: function(req, res) {
-            var publicOnly = req.params.owner !== req.session.username;
+            // If requesting for another user, only return the public projects
+            const publicOnly = req.params.owner !== req.session.username;
+            const username = req.params.owner;
 
             // return the names of all projects owned by :owner
-            middleware.loadUser(req.params.owner, res, user => res.json(
-                user.rooms
-                    .filter(room => !publicOnly || !!room.Public)
-                    .map(room => room.name))
-            );
+            log(`getting project names for ${username}`);
+            return Users.get(username)
+                .then(user => {
+                    if (!user) {
+                        return res.status(400).send('Invalid username');
+                    }
+
+                    return user.getRawProjects()
+                        .then(projects => {
+                            const names = projects
+                                .filter(project => !publicOnly || !!project.Public)
+                                .map(project => project.name);
+
+                            return res.json(names);
+                        });
+                });
 
         }
     },
@@ -621,7 +797,7 @@ module.exports = [
                 })
                 .then(project => {
                     if (project && project.Public) {
-                        return Utils.getRoomXML(project)
+                        return project.toXML()
                             .then(xml => res.send(xml));
                     } else {
                         return res.status(400).send('ERROR: Project not available');

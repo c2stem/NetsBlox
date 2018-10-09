@@ -8,27 +8,14 @@ var R = require('ramda'),
     version = require('../../package.json').version;
 
 const APP = `NetsBlox ${version}, http://netsblox.org`;
+const SERVER_NAME = process.env.SERVER_NAME || 'netsblox';
+
 
 var uuid = function(owner, name) {
     return owner + '/' + name;
 };
 
 // Helpers for routes
-var APP_REGEX = /app="([^"]+)"/;
-var getRoomXML = function(project) {
-    return project.getRoles()
-        .then(roles => {
-            roles = sortByDateField(roles, 'Updated', -1);
-
-            var roleXml = roles.map(role =>
-                `<role name="${role.ProjectName}">${role.SourceCode + role.Media}</role>`
-            ).join('');
-            var app = roleXml.match(APP_REGEX)[1] || APP;
-
-            return `<room name="${project.name}" app="${app}">${roleXml}</room>`;
-        });
-};
-
 var serializeArray = function(content) {
     assert(content instanceof Array);
     return content.map(serialize).join(' ');
@@ -42,23 +29,13 @@ var serialize = function(service) {
 var serializeRole = (role, project) => {
     const owner = encodeURIComponent(project.owner);
     const name = encodeURIComponent(project.name);
+    const roleId = encodeURIComponent(role.ID);
     const src = role.SourceCode ?
         `<snapdata>+${encodeURIComponent(role.SourceCode + role.Media)}</snapdata>` :
         '';
-    return `RoomName=${name}&Owner=${owner}&` +
-        serialize(R.omit(['SourceCode', 'Media'], role)) +
+    return `ProjectID=${project.getId()}&RoleID=${roleId}&RoomName=${name}&` +
+        `Owner=${owner}&${serialize(R.omit(['SourceCode', 'Media'], role))}` +
         `&SourceCode=${src}`;
-};
-
-var joinActiveProject = function(userId, room, res) {
-    let openRole = room.getUnoccupiedRole();
-
-    trace(`room "${room.name}" is already active`);
-    return room.getRole(openRole).then(role => {
-        trace(`adding ${userId} to role "${openRole}" at "${room.name}"`);
-        let serialized = serializeRole(role, room);
-        return res.send(serialized);
-    });
 };
 
 // Function helpers
@@ -115,7 +92,7 @@ var computeAspectRatioPadding = function(width, height, ratio){
 };
 
 var isSocketUuid = function(name) {
-    return name[0] === '_';
+    return name && name[0] === '_';
 };
 
 var getEmptyRole = function(name) {
@@ -219,13 +196,25 @@ const sortByDateField = function(list, field, dir) {
     });
 };
 
+let lastId = '';
+const getNewClientId = function() {
+    let suffix = Date.now();
+
+    if (lastId.includes(suffix)) {
+        let count = +lastId.split('_')[2] || 1;
+        suffix += '_' + (count+1);
+    }
+
+    const clientId = '_' + SERVER_NAME + suffix;
+    lastId = clientId;
+    return clientId;
+};
+
 module.exports = {
     serialize,
     serializeArray,
     serializeRole,
-    joinActiveProject,
     uuid,
-    getRoomXML,
     extractRpcs,
     computeAspectRatioPadding,
     isSocketUuid,
@@ -239,5 +228,6 @@ module.exports = {
     getArgumentsFor,
     APP,
     version,
-    sortByDateField
+    sortByDateField,
+    getNewClientId
 };

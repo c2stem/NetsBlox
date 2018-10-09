@@ -1,3 +1,9 @@
+/**
+ * Charting service powered by Gnuplot
+ *
+ * @service
+ */
+
 const ApiConsumer = require('../utils/api-consumer'),
     rpcUtils = require('../utils'),
     gnuPlot = require('./node-gnuplot.js'),
@@ -30,14 +36,14 @@ function calcRanges(lines, isCategorical){
             min: Number.MAX_VALUE, max: -1 * Number.MAX_VALUE
         }
     };
-    if (! isCategorical){
+    if (!isCategorical){
         stats.x = {
             min: Number.MAX_VALUE, max: -1 * Number.MAX_VALUE
         }; 
     }
     lines.forEach(line => {
 
-        if (! isCategorical){
+        if (!isCategorical){
             // min max of x
             let xs = line.map(pt => pt[0]);
             let xmin = Math.min.apply(null, xs);
@@ -149,7 +155,7 @@ chart.draw = function(lines, options){
     opts.yRange = {min: stats.y.min - relativePadding.y, max: stats.y.max + relativePadding.y};
     if (options.yRange.length === 2) opts.yRange = {min: options.yRange[0], max: options.yRange[1]};
 
-    if (! options.isCategorical){
+    if (!options.isCategorical){
         relativePadding.x = stats.x.range !== 0 ? stats.x.range * 0.05 : 1;
         opts.xRange = {min: stats.x.min - relativePadding.x, max: stats.x.max + relativePadding.x};
         if (options.xRange.length === 2) opts.xRange = {min: options.xRange[0], max: options.xRange[1]};

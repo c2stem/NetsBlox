@@ -25,6 +25,10 @@ var src = srcFiles
     .map(file => fs.readFileSync(file, 'utf8'))
     .join('\n');
 
+var uglySrc = {};
+srcFiles
+    .forEach(file => uglySrc[file] = fs.readFileSync(file, 'utf8'));
+
 var ugly = require('uglify-js');
 
 var final_code = src;
@@ -38,7 +42,12 @@ if (isDevEnv) {  // don't minify in dev
 } else {
     console.log('dev src length:', src.length);
 
-    final_code = ugly.minify(srcFiles, {outSourceMap: path.join(srcPath, 'netsblox-build.js.map')}).code;
+    const result = ugly.minify(uglySrc);
+    final_code = result.code;
+    if (result.error) {
+        console.error(result.error);
+        throw result.error;
+    }
     console.log('output length:', final_code.length);
     console.log('compression ratio:', 1-(final_code.length/src.length));
 }

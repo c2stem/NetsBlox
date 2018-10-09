@@ -10,8 +10,7 @@ const Q = require('q');
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const reqSrc = p => require(PROJECT_ROOT + '/src/server/' + p);
 
-const ActiveRoom = require(PROJECT_ROOT + '/src/server/rooms/active-room');
-const NetsBloxSocket = require(PROJECT_ROOT + '/src/server/rooms/netsblox-socket');
+const Client = reqSrc('client');
 const Socket = require('./mock-websocket');
 const Logger = require(PROJECT_ROOT + '/src/server/logger');
 const Storage = require(PROJECT_ROOT + '/src/server/storage/storage');
@@ -19,6 +18,9 @@ const mainLogger = new Logger('netsblox:test');
 const storage = new Storage(mainLogger);
 const serverUtils = reqSrc('server-utils');
 const Projects = reqSrc('storage/projects');
+const NetworkTopology = reqSrc('network-topology');
+
+NetworkTopology.init(new Logger('netsblox:test'), Client);
 
 (function() {
     var clientDir = path.join(PROJECT_ROOT, 'src', 'browser'),
@@ -34,7 +36,7 @@ const Projects = reqSrc('storage/projects');
                     .split('// Morph')[0]
                     .split('// Global Functions')[1];
             }
-        
+
             if (file.includes('store.js')) {  // remove the SnapSerializer stuff
                 code = code.split('StageMorph.prototype.toXML')[0];
             }
@@ -47,11 +49,13 @@ const Projects = reqSrc('storage/projects');
     src = [
         'modules = {};',
         'window = {location:{}};',
+        'var CLIENT_ID, SERVER_URL;',
         'var SnapActions;',
+        'var SnapCloud = {};',
         src,
-        'global.Client = global.Client || {};',
-        'global.Client.XML_Serializer = XML_Serializer;',
-        'global.Client.SnapActions = SnapActions;'
+        'global.Browser = global.Browser || {};',
+        'global.Browser.XML_Serializer = XML_Serializer;',
+        'global.Browser.SnapActions = SnapActions;'
     ].join('\n');
     eval(src);
 })(this);
@@ -63,12 +67,12 @@ const idBlocks = block => {
     return block;
 };
 
-const parser = new Client.XML_Serializer();
+const parser = new Browser.XML_Serializer();
 const canLoadXml = string => {
     var xml;
 
     // Add a collabId and reserialize
-    var res = Client.SnapActions.uniqueIdForImport(string);
+    var res = Browser.SnapActions.uniqueIdForImport(string);
     xml = res.toString();
     assert(parser.parse(xml));
 };
@@ -76,42 +80,43 @@ const canLoadXml = string => {
 // Create configured room helpers
 let logger = new Logger('netsblox:test');
 const createSocket = function(username) {
-    const socket = new NetsBloxSocket(logger, new Socket());
-    socket.uuid = `_netsblox${Date.now()}`;
+    const socket = new Client(logger, new Socket());
+    socket.uuid = serverUtils.getNewClientId();
     socket.username = username || socket.uuid;
+    NetworkTopology.onConnect(socket);
     return socket;
 };
 
-const createRoom = function(config) {
+const createRoom = async function(config) {
     // Get the room and attach a project
-    const room = new ActiveRoom(logger, config.name, config.owner);
-    
-    Object.keys(config.roles).forEach(name => {
-        config.roles[name] = config.roles[name] || [];
-        room.silentCreateRole(name);
-        config.roles[name].forEach(username => {
+    const roleNames = Object.keys(config.roles);
+
+    // Ensure there is an owner
+    config.owner = config.owner || roleNames
+        .map(name => config.roles[name])
+        .reduce((l1, l2) => l1.concat(l2), [])
+        .unshift();
+
+    const {name, owner} = config;
+    const project = await Projects.new({name, owner});
+    const roles = roleNames.map(name => serverUtils.getEmptyRole(name));
+    await project.setRoles(roles);
+    const ids = await project.getRoleIdsFor(roleNames);
+
+    const projectId = project.getId();
+    roleNames.forEach((name, i) => {
+        const roleId = ids[i];
+        const usernames = config.roles[name] || [];
+
+        usernames.forEach(username => {
             const socket = createSocket(username);
-            
-            room.silentAdd(socket, name);
+            NetworkTopology.setClientState(socket.uuid, projectId, roleId, username);
+            return socket;
         });
     });
 
-    const owner = room.getOwnerSockets()[0];
-    
-    //  Add response capabilities
-    room.sockets().forEach(socket => {
-        socket._socket.addResponse('project-request', sendEmptyRole.bind(socket));
-    });
-    
-    if (owner) {
-        return Projects.new(owner, room)
-            .then(project => {
-                room.setStorage(project);
-                return room;
-            });
-    } else {  // don't add a project if not occupied
-        return Q(room);
-    }
+    return project;
+
 };
 
 const sendEmptyRole = function(msg) {

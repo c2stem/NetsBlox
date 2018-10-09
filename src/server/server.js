@@ -6,8 +6,7 @@ var express = require('express'),
     _ = require('lodash'),
     dot = require('dot'),
     Utils = _.extend(require('./utils'), require('./server-utils.js')),
-    SocketManager = require('./socket-manager'),
-    RoomManager = require('./rooms/room-manager'),
+    NetworkTopology = require('./network-topology'),
     RPCManager = require('./rpc/rpc-manager'),
     Storage = require('./storage/storage'),
     EXAMPLES = require('./examples'),
@@ -31,6 +30,7 @@ var express = require('express'),
 const CLIENT_ROOT = path.join(__dirname, '..', 'browser');
 const indexTpl = dot.template(fs.readFileSync(path.join(CLIENT_ROOT, 'index.dot')));
 const middleware = require('./routes/middleware');
+const Client = require('./client');
 
 var Server = function(opts) {
     this._logger = new Logger('netsblox');
@@ -46,8 +46,7 @@ var Server = function(opts) {
 
     // Group and RPC Managers
     this.rpcManager = RPCManager;
-    RoomManager.init(this._logger, this.storage);
-    SocketManager.init(this._logger, this.storage);
+    NetworkTopology.init(this._logger, Client);
 };
 
 Server.prototype.configureRoutes = function() {
@@ -70,75 +69,31 @@ Server.prototype.configureRoutes = function() {
     });
 
     // Add routes
-    this.app.use('/rpc', this.rpcManager.router);
+    this.app.use('/rpc', function(req, res, next) {
+        return middleware.tryLogIn(req, res, function() {
+            next();
+        }, true);
+    }, this.rpcManager.router);
     this.app.use('/api', this.createRouter());
 
     // Add deployment state endpoint info
     const stateEndpoint = process.env.STATE_ENDPOINT || 'state';
-    this.app.get(`/${stateEndpoint}/rooms`, function(req, res) {
-        const rooms = RoomManager.getActiveRooms();
-        return res.json(rooms.map(room => {
-            const roles = {};
-            const project = room.getProject();
-            let lastUpdatedAt = null;
-
-            if (project) {
-                lastUpdatedAt = new Date(project.lastUpdatedAt);
-            }
-
-            room.getRoleNames().forEach(role => {
-                roles[role] = room.getSocketsAt(role).map(socket => {
-                    return {
-                        username: socket.username,
-                        uuid: socket.uuid
-                    };
-                });
-            });
-
-            return {
-                uuid: room.uuid,
-                name: room.name,
-                owner: room.owner,
-                collaborators: room.getCollaborators(),
-                lastUpdatedAt: lastUpdatedAt,
-                roles: roles
-            };
-        }));
-    });
 
     this.app.get(`/${stateEndpoint}/sockets`, function(req, res) {
-        const sockets = SocketManager.sockets().map(socket => {
-            const room = socket.getRawRoom();
-            const roomName = room && Utils.uuid(room.owner, room.name);
-
+        const sockets = NetworkTopology.sockets().map(socket => {
             return {
-                uuid: socket.uuid,
+                clientId: socket.uuid,
                 username: socket.username,
-                room: roomName,
-                role: socket.role
+                projectId: socket.projectId,
+                roleId: socket.roleId
             };
         });
 
         res.json(sockets);
     });
 
-    // Add dev endpoints
-    if (isDevMode) {
-        const CLIENT_TEST_ROOT = path.join(__dirname, '..', '..', 'test', 'unit', 'client');
-        const testTpl = dot.template(fs.readFileSync(path.join(CLIENT_TEST_ROOT, 'index.dot')));
-        this.app.use('/dev/', express.static(__dirname + '/../../test/unit/client/'));
-        this.app.get('/dev/', (req, res) => {
-            return middleware.setUsername(req, res).then(() => {
-                const contents = {
-                    username: req.session.username,
-                };
-                return res.send(testTpl(contents));
-            });
-        });
-    }
-
     // Initial page
-    this.app.get('/', (req, res) => {
+    this.app.get('/', middleware.noCache, (req, res) => {
         return middleware.setUsername(req, res).then(() => {
             var baseUrl = `${process.env.SERVER_PROTOCOL || req.protocol}://${req.get('host')}`,
                 url = baseUrl + req.originalUrl,
@@ -148,6 +103,7 @@ Server.prototype.configureRoutes = function() {
                     username: req.session.username,
                     isDevMode: isDevMode,
                     googleAnalyticsKey: process.env.GOOGLE_ANALYTICS,
+                    clientId: Utils.getNewClientId(),
                     baseUrl,
                     url: url
                 };
@@ -339,8 +295,15 @@ Server.prototype.start = function(done) {
 
                 // eslint-disable-next-line no-console
                 console.log(`listening on port ${this.opts.port}`);
+
+                // Enable the websocket handling
                 this._wss = new WebSocketServer({server: this._server});
-                SocketManager.enable(this._wss);
+                this._wss.on('connection', (socket, req) => {
+                    socket.upgradeReq = req;
+                    const client = new Client(this._logger, socket);
+                    NetworkTopology.onConnect(client);
+                });
+
                 // Enable Vantage
                 if (this.opts.vantage) {
                     new Vantage(this).start(this.opts.vantagePort);
@@ -389,9 +352,24 @@ Server.prototype.createRouter = function() {
 
         router.route(api.URL)[method]((req, res) => {
             if (api.Service) {
-                logger.trace(`received ${api.Service} request`);
+                const args = (api.Parameters || '').split(',')
+                    .map(name => req.body[name] || 'undefined')
+                    .map(content => content.length < 50 ? content : '<omitted>')
+                    .join(', ');
+                logger.trace(`received request ${api.Service}(${args})`);
             }
-            return api.Handler.call(this, req, res);
+            try {
+                const result = api.Handler.call(this, req, res);
+                if (result && result.then) {
+                    result.catch(err => {
+                        logger.error(`error occurred in ${api.URL}:`, err);
+                        res.status(500).send(err.message);
+                    });
+                }
+            } catch (err) {
+                logger.error(`error occurred in ${api.URL}:`, err);
+                res.status(500).send(err.message);
+            }
         });
     });
     return router;

@@ -6,13 +6,12 @@
 
 'use strict';
 
-var debug = require('debug'),
-    log = debug('netsblox:rpc:connect-n:log'),
-    trace = debug('netsblox:rpc:connect-n:trace'),
-    Constants = require('../../../../common/constants'),
-    info = debug('netsblox:rpc:connect-n:info');
+const logger = require('../utils/logger')('connect-n');
+const Constants = require('../../../../common/constants');
+const NetworkTopology = require('../../../network-topology');
+const Utils = require('../utils');
 
-var ConnectN = function() {
+const ConnectN = function() {
     this._state = {};
     this._state.board = ConnectN.getNewBoard();
     this._state._winner = null;
@@ -39,20 +38,20 @@ ConnectN.prototype.newGame = function(row, column, numDotsToConnect) {
 
     this._state.numDotsToConnect = Math.min(Math.max(this._state.numRow, this._state.numCol), this._state.numDotsToConnect);
 
-    info(this.socket.role+' is clearing board and creating a new one with size: ', this._state.numRow, ', ', this._state.numCol);
+    logger.info(this.caller.roleId+' is clearing board and creating a new one with size: ', this._state.numRow, ', ', this._state.numCol);
     this._state.board = ConnectN.getNewBoard(this._state.numRow, this._state.numCol);
 
-    this.socket._room.sockets()
-        .forEach(socket => socket.send({
-            type: 'message',
-            msgType: 'start',
-            dstId: Constants.EVERYONE,
-            content: {
-                row: this._state.numRow,
-                column: this._state.numCol,
-                numDotsToConnect: this._state.numDotsToConnect
-            }
-        }));
+    const sockets = NetworkTopology.getSocketsAtProject(this.caller.projectId);
+    sockets.forEach(socket => socket.send({
+        type: 'message',
+        msgType: 'start',
+        dstId: Constants.EVERYONE,
+        content: {
+            row: this._state.numRow,
+            column: this._state.numCol,
+            numDotsToConnect: this._state.numDotsToConnect
+        }
+    }));
 
     return `Board: ${this._state.numRow}x${this._state.numCol} Total dots to connect: ${this._state.numDotsToConnect}`;
 };
@@ -67,18 +66,17 @@ ConnectN.prototype.newGame = function(row, column, numDotsToConnect) {
 ConnectN.prototype.play = function(row, column) {
     // ...the game is still going
     if (this._state._winner) {
-        log('"'+roleId+'" is trying to play after the game is over');
-        return 'The game is over!';
+        logger.log('"'+roleId+'" is trying to play after the game is over');
+        throw new Error('The game is over!');
     }
 
-    var roleId = this.socket.role,
-        open = false,
+    var roleId = this.caller.roleId,
         isOnBoard = false;
 
     // ...it is the given role's turn
     if (this._state.lastMove === roleId) {
-        log('"'+roleId+'" is trying to play twice in a row!');
-        return 'Trying to play twice in a row!';
+        logger.log('"'+roleId+'" is trying to play twice in a row!');
+        throw new Error('Trying to play twice in a row!');
     }
 
 
@@ -90,62 +88,67 @@ ConnectN.prototype.play = function(row, column) {
 
     // ...it's a valid position
     if (!isOnBoard) {
-        log('"'+roleId+'" is trying to play in an invalid position ('+row+','+column+')');
-        return 'Trying to play at invalid position!';
+        logger.log('"'+roleId+'" is trying to play in an invalid position ('+row+','+column+')');
+        throw new Error('Trying to play at invalid position!');
     }
 
 
-    trace('"'+roleId+'" is trying to play at '+row+','+column+'. Board is \n'+
+    logger.trace('"'+roleId+'" is trying to play at '+row+','+column+'. Board is \n'+
         this._state.board.map(function(row) {
             return row.map(t => t || '_').join(' ');
         })
             .join('\n'));
 
     // ...it's not occupied
-    open = this._state.board[row][column] === null;
-    if (open) {
-        this._state.board[row][column] = roleId;
-        this._state._winner = ConnectN.getWinner(this._state.board, this._state.numDotsToConnect);
-        trace('"'+roleId+'" successfully played at '+row+','+column);
-        // Send the play message to everyone!
-        this.socket._room.sockets()
-            .forEach(socket => socket.send({
+    const isOccupied = this._state.board[row][column] !== null;
+    if (isOccupied) {
+        throw new Error('Position is already occupied!');
+    }
+
+    this._state.board[row][column] = roleId;
+    logger.trace('"'+roleId+'" successfully played at '+row+','+column);
+
+    const winnerId = ConnectN.getWinner(this._state.board, this._state.numDotsToConnect);
+    this._state._winner = winnerId;
+
+    return Utils.getRoleNames(this.caller.projectId, [this.caller.roleId, winnerId])
+        .then(roleNames => {
+            // Send the play message to everyone!
+            const [roleName, winnerRoleName] = roleNames;
+            const sockets = NetworkTopology.getSocketsAtProject(this.caller.projectId);
+            sockets.forEach(socket => socket.send({
                 type: 'message',
                 dstId: Constants.EVERYONE,
                 msgType: 'play',
                 content: {
                     row: row,
                     column: column,
-                    role: roleId
+                    role: roleName
                 }
             }));
 
-        this._state.lastMove = roleId;
+            this._state.lastMove = roleId;
 
 
-        trace('"'+roleId+'" is after playing at '+row+','+column+'. Board is \n'+
-            this._state.board.map(function(row) {
-                return row.map(t => t || '_').join(' ');
-            })
-                .join('\n'));
+            logger.trace('"'+roleId+'" is after playing at '+row+','+column+'. Board is \n'+
+                this._state.board.map(function(row) {
+                    return row.map(t => t || '_').join(' ');
+                })
+                    .join('\n'));
 
 
-        if(this.isGameOver())
-        {
-            this.socket._room.sockets()
-                .forEach(socket => socket.send({
+            if(this.isGameOver())
+            {
+                sockets.forEach(socket => socket.send({
                     type: 'message',
                     dstId: Constants.EVERYONE,
                     msgType: 'gameOver',
                     content: {
-                        winner: this._state._winner
+                        winner: winnerRoleName
                     }
                 }));
-        }
-
-        return '';
-    }
-    return 'Play was not successful!';
+            }
+        });
 };
 
 /**
@@ -162,7 +165,7 @@ ConnectN.prototype.isGameOver = function() {
     isOver = isOver || isDraw;
     if(isDraw)
         this._state._winner = 'DRAW';
-    log('isGameOver: ' + isOver + ' (' + this._state._winner + ')');
+    logger.log('isGameOver: ' + isOver + ' (' + this._state._winner + ')');
     return isOver;
 };
 

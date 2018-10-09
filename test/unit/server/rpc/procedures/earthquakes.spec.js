@@ -3,7 +3,6 @@ describe('earthquakes', function() {
     var EarthQuakes = utils.reqSrc('rpc/procedures/earthquakes/earthquakes'),
         RPCMock = require('../../../../assets/mock-rpc'),
         earthquakes,
-        storage = utils.reqSrc('storage/storage'),
         assert = require('assert');
 
     before(function() {
@@ -32,7 +31,7 @@ describe('earthquakes', function() {
         });
 
         it('should remove entry from remainingMsgs', function() {
-            var uuid = earthquakes._rpc.socket.uuid,
+            var uuid = earthquakes.socket.uuid,
                 remainingMsgs = earthquakes._rpc._remainingMsgs;
 
             remainingMsgs[uuid] = [];
@@ -48,13 +47,16 @@ describe('earthquakes', function() {
             before(function() {
                 var remainingMsgs = earthquakes._rpc._remainingMsgs;
 
-                socket = earthquakes._rpc.socket;
+                socket = earthquakes.socket;
                 remainingMsgs[socket.uuid] = [{dstId: 'someOldRole'}];
                 earthquakes._rpc._sendNext(socket);
             });
 
             it('should stop sending if the socket changes roles', function() {
-                assert.equal(socket.messages().length, 0);
+                const msgs = socket._socket.messages()
+                    .filter(msg => msg.type === 'message');
+
+                assert.equal(msgs.length, 0);
             });
 
             it('should remove remaining msgs record', function() {
@@ -66,7 +68,7 @@ describe('earthquakes', function() {
             it('should not fail if no earthquakes found', function() {
                 var remainingMsgs = earthquakes._rpc._remainingMsgs;
 
-                socket = earthquakes._rpc.socket;
+                socket = earthquakes.socket;
                 remainingMsgs[socket.uuid] = [];
                 earthquakes._rpc._sendNext(socket);
             });

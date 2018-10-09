@@ -1,4 +1,4 @@
-const Logger = require('../../../logger'),
+const newLogger = require('./logger'),
     CacheManager = require('cache-manager'),
     fsStore = require('cache-manager-fs'),
     fs = require('fs'),
@@ -24,7 +24,7 @@ class ApiConsumer {
         },opts);
         if (!fs.existsSync(opts.cache.path)) fs.mkdirSync(opts.cache.path);
         this._baseUrl = baseUrl;
-        this._logger = new Logger('netsblox:rpc:'+this._name);
+        this._logger = newLogger(this._name);
         // setup api endpoint
         this.COMPATIBILITY = {
             path: this._name
@@ -149,14 +149,14 @@ class ApiConsumer {
         if (msgs && msgs.length) {
             var msg = msgs.shift();
 
-            while (msgs.length && msg.dstId !== this.socket.role) {
+            while (msgs.length && msg.dstId !== this.socket.roleId) {
                 msg = msgs.shift();
             }
 
             // check that the socket is still at the role receiving the messages
-            if (msg && msg.dstId === this.socket.role) {
-                this._logger.trace('sending msg to', this.socket.uuid, this.socket.role);
-                this.socket.send(msg);
+            if (msg && msg.dstId === this.socket.roleId) {
+                this._logger.trace('sending msg to', this.socket.uuid, this.socket.roleId);
+                this.socket.sendMessage(msg.msgType, msg.content);
             }
 
             if (msgs.length) {
@@ -238,7 +238,7 @@ class ApiConsumer {
 
                 msgContents.forEach(content=>{
                     let msg = {
-                        dstId: this.socket.role,
+                        dstId: this.socket.roleId,
                         msgType,
                         content
                     };
@@ -286,13 +286,16 @@ class ApiConsumer {
     }
 
     _stopMsgs(){
+        let msgCount;
         if (this._remainingMsgs[this.socket.uuid]) {
-            this.response.status(200).send('stopping sending of the remaining ' + this._remainingMsgs[this.socket.uuid].length + 'msgs');
+            msgCount = this._remainingMsgs[this.socket.uuid].length;
             delete this._remainingMsgs[this.socket.uuid];
-            this._logger.trace('stopped sending messages for uuid:',this.socket.uuid, this.socket.role);
+            this._logger.trace('stopped sending messages for uuid:',this.socket.uuid, this.socket.roleId);
         }else {
-            return 'there are no messages in the queue to stop.';
+            msgCount = 0;
+            this._logger.trace('there are no messages in the queue to stop.');
         }
+        return msgCount;
     }
 }
 
