@@ -2,11 +2,11 @@
 [![Stories in Ready](https://img.shields.io/waffle/label/netsblox/netsblox/ready.svg)](http://waffle.io/NetsBlox/NetsBlox)
 [![Join the chat at https://gitter.im/NetsBlox/NetsBlox](https://badges.gitter.im/NetsBlox/NetsBlox.svg)](https://gitter.im/NetsBlox/NetsBlox?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 [![Greenkeeper badge](https://badges.greenkeeper.io/NetsBlox/NetsBlox.svg)](https://greenkeeper.io/)
-# NetsBlox
+# NetsBlox (dev)
 
 NetsBlox is a visual programming language which allows people to develop networked programs.  
 
-## Overview
+## Overview 
 Netsblox is an extension of _Snap!_ which allows users to use some distributed computing concepts and develop network-enabled apps. That is, users can create apps that can interact with other instances of Netsblox. An introduction to the new networking capabilities can be found [here](https://github.com/NetsBlox/NetsBlox/wiki/Introduction-to-Distributed-Programming-in-NetsBlox)
 
 Currently, we have support for _messages_ where a message is like a Snap! event except contains an additional data payload. For example, in the Tic-Tac-Toe example, the user is able to  create a "TicTacToe" message which contains *row* and *column* fields corresponding to the row and column that of the user's move.
