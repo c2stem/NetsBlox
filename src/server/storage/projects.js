@@ -556,6 +556,9 @@
                 }
             }
         );
+        // every load/save looks projects up by owner + name
+        collection.createIndex({owner: 1, name: 1})
+            .catch(err => logger.error(`could not create projects index: ${err}`));
         ProjectArchives = db.collection('project-archives');
     };
 

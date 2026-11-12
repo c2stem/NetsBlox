@@ -8,7 +8,14 @@
 //   - store(data): Promise<id>
 //   - get(hash): Promise<data>
 
-const hash = require('../../../common/sha512').hex_sha512;
+// Native SHA-512 that produces exactly the same ids as the legacy pure-JS
+// hex_sha512 (src/common/sha512.js), which UTF-8 encodes the string twice
+// (str2rstr_utf8 followed by CryptoJS Utf8.parse). Matching that keeps every
+// existing blob id valid. The JS version blocked the event loop ~2.3s per 8MB.
+const crypto = require('crypto');
+const hash = data => crypto.createHash('sha512')
+    .update(Buffer.from(Buffer.from(data, 'utf8').toString('latin1'), 'utf8'))
+    .digest('hex');
 
 // Backends
 const S3Backend = require('./s3');
@@ -44,4 +51,5 @@ class BlobStorage {
     }
 }
 
+BlobStorage.hash = hash;  // exposed for tests
 module.exports = BlobStorage;

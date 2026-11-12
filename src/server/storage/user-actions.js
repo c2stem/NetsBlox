@@ -7,6 +7,9 @@
     UserActionData.init = function(_logger, db) {
         logger = _logger.fork('user-actions');
         collection = db.collection('netsblox:storage:user-actions');
+        // for exporting a student's action log in order (AST reconstruction)
+        collection.createIndex({username: 1, sessionId: 1, 'action.id': 1})
+            .catch(err => logger.error(`could not create user-actions index: ${err}`));
     };
 
     UserActionData.record = async function(event) {

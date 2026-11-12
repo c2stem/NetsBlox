@@ -198,6 +198,9 @@
     UserStorage.init = function (logger, db) {
         this._logger = logger.fork('users');
         collection = db.collection('users');
+        // login and every project lookup query users by username
+        collection.createIndex({username: 1})
+            .catch(err => this._logger.error(`could not create users index: ${err}`));
         this.collection = collection;
     };
 

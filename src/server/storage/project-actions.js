@@ -20,6 +20,9 @@
         });
         const oneDay = 3600 * 24;
         collection.createIndex({ time: 1 }, { expireAfterSeconds: oneDay });
+        // read and upserted on every edit action
+        actionIdCollection.createIndex({projectId: 1, roleId: 1})
+            .catch(err => logger.error(`could not create latest-action-ids index: ${err}`));
     };
 
     ProjectActions.store = function(action) {

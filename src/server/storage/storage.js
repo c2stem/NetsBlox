@@ -22,13 +22,28 @@ var Storage = function() {
 };
 
 Storage.prototype.getDatabaseFromURI = function(mongoURI) {
-    return mongoURI.replace(/^(mongodb:\/\/)?[a-zA-Z0-9-_:\.]+\/?/, '') || 'admin';
+    // Supports credentials, host lists, mongodb+srv and query strings, e.g.
+    // mongodb://user:pass@10.0.0.5:27017/c2stem-editor?authSource=admin
+    const withoutScheme = mongoURI.replace(/^mongodb(\+srv)?:\/\//, '');
+    const slash = withoutScheme.indexOf('/');
+    if (slash === -1) return 'admin';
+    const dbName = withoutScheme.slice(slash + 1).split('?')[0];
+    return decodeURIComponent(dbName) || 'admin';
+};
+
+// hide credentials when logging the connection string
+Storage.prototype.redactURI = function(mongoURI) {
+    return mongoURI.replace(/\/\/[^@/]*@/, '//***@');
 };
 
 Storage.prototype.connect = function(mongoURI) {
     mongoURI = mongoURI || process.env.MONGO_URI || process.env.MONGOLAB_URI || 'mongodb://localhost:27017';
     const dbName = this.getDatabaseFromURI(mongoURI);
-    return Q(MongoClient.connect(mongoURI))
+    const options = {
+        useUnifiedTopology: true,
+        poolSize: +process.env.MONGO_POOL_SIZE || 50,
+    };
+    return Q(MongoClient.connect(mongoURI, options))
         .then(client => {
             const db = client.db(dbName);
             this.users = Users;
@@ -45,13 +60,13 @@ Storage.prototype.connect = function(mongoURI) {
 
             this._db = db;
             this._client = client;
-            this._logger.info(`Connected to ${mongoURI}`);
+            this._logger.info(`Connected to ${this.redactURI(mongoURI)}`);
             this._deferred.resolve();
             return db;
         })
         .catch(err => {
             /* eslint-disable no-console */
-            console.error(`Could not connect to mongodb at ${mongoURI}.`);
+            console.error(`Could not connect to mongodb at ${this.redactURI(mongoURI)}.`);
             console.error('To connect to a different mongo instance, set MONGO_URI to the mongo uri and try again:');
             console.error('');
             console.error('    MONGO_URI=mongodb://some.ip.address:27017/ netsblox start');
