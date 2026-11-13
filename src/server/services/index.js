@@ -75,6 +75,13 @@ async function listen(port) {
 }
 
 if (require.main === module) {
+    // Node 15+ exits on an unhandled promise rejection (Node 12, used on the old
+    // server, only warned). Several services fetch external data in the
+    // background; log those failures instead of crashing the services server.
+    const crashLogger = new Logger('services');
+    process.on('unhandledRejection', err => {
+        crashLogger.error(`Unhandled rejection: ${err && err.stack || err}`);
+    });
     listen(process.env.PORT || 6000);
 }
 

@@ -40,8 +40,16 @@ class COVIDData {
         while (!this.isToday(day)) {
             const dateString = this.getDateString(day);
             if (!skipDates.includes(dateString)) {
-                const report = await this.fetchDailyReport(day);
-                await this.importReport(report, day);
+                // The JHU CSSE repository stopped publishing daily reports in
+                // March 2023. Stop at the first report that cannot be fetched
+                // instead of throwing (an unhandled rejection crashes Node 15+).
+                try {
+                    const report = await this.fetchDailyReport(day);
+                    await this.importReport(report, day);
+                } catch (err) {
+                    this.logger.warn(`stopping COVID-19 import at ${dateString}: ${err.message}`);
+                    return;
+                }
             }
             day = nextDay(day);
         }

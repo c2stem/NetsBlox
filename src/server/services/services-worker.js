@@ -58,7 +58,12 @@ class ServicesWorker {
     async initialize() {
         this.getServices()
             .filter(service => service.isSupported() && service.initialize)
-            .forEach(service => service.initialize());
+            .forEach(service => {
+                // A failing data import must not take down the services server.
+                Promise.resolve()
+                    .then(() => service.initialize())
+                    .catch(err => this._logger.error(`Failed to initialize ${service.serviceName}: ${err && err.message || err}`));
+            });
 
         this.checkStaleServices();
     }
